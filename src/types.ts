@@ -13,15 +13,24 @@ export interface PromptParameters {
 export interface Job {
   id: string;
   prompt: string;
-  status: 'pending' | 'generating' | 'done' | 'error';
+  status: 'generating' | 'upscaling' | 'done' | 'error';
   progress: number;
-  hash: string;
+  hash?: string;
   imageUrl?: string;
-  modifiedImages: ModifiedImage[];
-  parameters: PromptParameters;
-  createdAt: Date;
+  parameters?: PromptParameters;
+  createdAt: string;  // Changed from Date to string
   error?: string;
-  isSaved: boolean;
-  notes?: string;
-  savedJobId?: string;
+  saved?: boolean;
+  modifiedImages?: ModifiedImage[];  // Made optional since it's not always present
 }
+
+export interface StatusResponse {
+  status: 'pending' | 'generating' | 'upscaling' | 'done' | 'error';
+  progress: number;
+  imageUrl?: string;
+  sref_random_key?: string;
+  error?: string;
+}
+
+// Import and re-export SavedJob type from savedJobs service to ensure consistency
+export type { SavedJob } from './services/savedJobs';

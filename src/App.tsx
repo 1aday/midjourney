@@ -1,24 +1,18 @@
-import { useState, useRef, useEffect } from 'react'
-import { Button } from "@/components/ui/button"
-import { useToast } from "@/components/ui/use-toast"
+import React, { useState, useRef, useEffect } from 'react'
+import { Input } from './components/ui/input'
+import { Button } from './components/ui/button'
+import { Badge } from './components/ui/badge'
+import { Label } from './components/ui/label'
+import { Slider } from './components/ui/slider'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select'
+import { Loader2, X, CheckCircle2, BookmarkPlus, BookmarkCheck, Settings } from 'lucide-react'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
+import { useToast } from './components/ui/use-toast'
 import { midjourneyApi } from './services/midjourney'
 import { savedJobsApi } from './services/savedJobs'
-import { Loader2, X, Settings, BookmarkPlus, BookmarkCheck, CheckCircle2 } from 'lucide-react'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import { Progress } from "@/components/ui/progress"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Slider } from "@/components/ui/slider"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Badge } from "@/components/ui/badge"
-import { Job, PromptParameters } from './types'
+import { proxyApi } from './services/proxy'
+import { Job, SavedJob, PromptParameters } from './types'
 
 const DEFAULT_PARAMETERS: PromptParameters = {
   sref: 'random',
@@ -41,7 +35,6 @@ const ParameterControls: React.FC<ParameterControlsProps> = ({ parameters, onPar
   return (
     <div className="mt-2">
       <Button
-        variant="outline"
         onClick={() => setIsOpen(!isOpen)}
         className="w-full"
       >
@@ -114,23 +107,76 @@ const ParameterControls: React.FC<ParameterControlsProps> = ({ parameters, onPar
 }
 
 function App() {
-  const [prompt, setPrompt] = useState('')
+  const { toast } = useToast()
+  const statusPollingIntervals = useRef<Record<string, NodeJS.Timeout>>({});
   const [jobs, setJobs] = useState<Job[]>([])
+  const [savedJobs, setSavedJobs] = useState<SavedJob[]>([])
+  const [activeTab, setActiveTab] = useState<'recent' | 'saved'>('recent')
+  const [input, setInput] = useState('')
   const [parameters, setParameters] = useState<PromptParameters>(() => {
     const saved = localStorage.getItem('promptParameters')
     const parsed = saved ? JSON.parse(saved) : DEFAULT_PARAMETERS
-    return {
-      sref: parsed.sref || DEFAULT_PARAMETERS.sref,
-      ar: parsed.ar || DEFAULT_PARAMETERS.ar,
-      s: typeof parsed.s === 'number' ? parsed.s : DEFAULT_PARAMETERS.s
-    }
+    return parsed
   })
-  const { toast } = useToast()
-  const statusPollingIntervals = useRef<{[key: string]: NodeJS.Timeout}>({})
+
+  // Keep server warm by polling health endpoint
+  useEffect(() => {
+    const keepWarm = () => {
+      proxyApi.get('/health').catch(() => {}); // Silently handle errors
+    };
+    const interval = setInterval(keepWarm, 25000); // Poll every 25s
+    return () => clearInterval(interval);
+  }, []);
+
+  const fetchSavedJobs = async () => {
+    try {
+      const jobs = await savedJobsApi.listSavedJobs()
+      setSavedJobs(jobs)
+    } catch (error: any) {
+      console.error('Error fetching saved jobs:', error)
+      toast({
+        title: "Error",
+        description: "Failed to fetch saved jobs: " + error.message,
+        variant: "destructive",
+      })
+    }
+  }
 
   useEffect(() => {
-    localStorage.setItem('promptParameters', JSON.stringify(parameters))
-  }, [parameters])
+    fetchSavedJobs()
+  }, [])
+
+  const handleSaveJob = async (jobId: string) => {
+    try {
+      const jobToSave = jobs.find(j => j.id === jobId);
+      if (!jobToSave) {
+        throw new Error('Job not found');
+      }
+
+      const savedJobRequest = {
+        prompt: jobToSave.prompt,
+        parameters: jobToSave.parameters || {},
+        image_url: jobToSave.imageUrl || '',
+        modified_images: jobToSave.modifiedImages?.map(img => ({
+          type: img.type,
+          url: img.url
+        })) || []
+      };
+
+      await savedJobsApi.saveJob(savedJobRequest);
+      toast({
+        title: "Job saved successfully",
+        description: "You can find it in the Saved Jobs tab",
+      });
+    } catch (error) {
+      console.error('Error saving job:', error);
+      toast({
+        title: "Error saving job",
+        description: "Please try again later",
+        variant: "destructive",
+      });
+    }
+  }
 
   const handleRemoveParameter = (key: keyof PromptParameters) => {
     setParameters(prev => ({
@@ -139,240 +185,228 @@ function App() {
     }))
   }
 
-  const handleStatusCheck = async (hash: string, jobId: string) => {
+  const handleStatusCheck = async (jobId: string, hash: string) => {
     try {
-      const status = await midjourneyApi.getStatus(hash)
-      console.log('Status check response:', status)
+      const status = await midjourneyApi.getStatus(hash);
 
       setJobs(prev => prev.map(job => {
-        if (job.id !== jobId) return job
+        if (job.id === jobId) {
+          const newStatus: Job['status'] =
+            status.status === 'done' ? 'done' :
+            status.status === 'error' ? 'error' :
+            'generating';
 
-        const newStatus: Job['status'] =
-          status.status === 'progress' || status.status === 'sent' || status.status === 'waiting'
-            ? 'generating'
-            : status.status === 'done'
-              ? 'done'
-              : status.status === 'error'
-                ? 'error'
-                : 'pending'
+          const updatedJob: Job = {
+            ...job,
+            status: newStatus,
+            progress: status.progress || 0,
+            hash,
+            imageUrl: status.result?.url,
+            error: status.status_reason || undefined
+          };
 
-        const updatedJob: Job = {
-          ...job,
-          status: newStatus,
-          progress: status.progress || 0,
-          imageUrl: status.result?.url,
-          error: status.status_reason || undefined,
-          modifiedImages: job.modifiedImages || []
+          if (status.status === 'done' && status.sref_random_key && job.parameters?.sref === 'random') {
+            const srefValue = parseInt(status.sref_random_key, 10);
+            if (!isNaN(srefValue)) {
+              updatedJob.parameters = {
+                ...job.parameters,
+                sref: srefValue
+              };
+            }
+          }
+
+          return updatedJob;
         }
+        return job;
+      }));
 
-        return updatedJob
-      }))
-
-      if (status.status === 'done' || status.status === 'error') {
-        clearInterval(statusPollingIntervals.current[jobId])
-        delete statusPollingIntervals.current[jobId]
-
-        if (status.status === 'done' && status.result?.url) {
-          toast({
-            title: 'Image generated successfully!',
-            description: 'You can now upscale or create variations.',
-          })
-        } else if (status.status === 'error') {
-          toast({
-            title: 'Error generating image',
-            description: status.status_reason || 'An unknown error occurred',
-            variant: 'destructive',
-          })
-        }
+      if (status.status !== 'done' && status.status !== 'error') {
+        setTimeout(() => handleStatusCheck(jobId, hash), 2000);
       }
     } catch (error) {
-      console.error('Error checking status:', error)
-      toast({
-        title: 'Error checking status',
-        description: 'Failed to check image generation status',
-        variant: 'destructive',
-      })
+      console.error('Error checking status:', error);
+      setJobs(prev => prev.map(job =>
+        job.id === jobId
+          ? { ...job, status: 'error', error: 'Failed to check status' }
+          : job
+      ));
     }
-  }
+  };
 
   useEffect(() => {
     return () => {
-      Object.values(statusPollingIntervals.current).forEach(clearInterval)
-    }
-  }, [])
+      Object.values(statusPollingIntervals.current).forEach((interval) => {
+        if (interval) clearInterval(interval);
+      });
+    };
+  }, []);
 
   const handleGenerate = async () => {
-    if (!prompt) {
+    if (!input.trim()) {
       toast({
         title: 'Please enter a prompt',
         description: 'The prompt cannot be empty',
         variant: 'destructive',
-      })
-      return
+      });
+      return;
     }
 
-    const fullPrompt = `${prompt} ${Object.entries(parameters)
-      .map(([key, value]) => `--${key} ${value}`)
-      .join(' ')}`
+    // Extract base prompt without parameters
+    const basePrompt = input.replace(/\s*--\w+\s+[^\s]+/g, '').trim();
 
-    const jobId = Date.now().toString()
+    // Add current parameters
+    const paramStrings = [];
+    if (parameters.sref) paramStrings.push(`--sref ${parameters.sref}`);
+    if (parameters.ar) paramStrings.push(`--ar ${parameters.ar}`);
+    if (parameters.s) paramStrings.push(`--s ${parameters.s}`);
+
+    const fullPrompt = `${basePrompt} ${paramStrings.join(' ')}`.trim();
+
+    const jobId = crypto.randomUUID(); // Use UUID instead of timestamp
     const newJob: Job = {
       id: jobId,
       prompt: fullPrompt,
-      status: 'pending',
+      status: 'generating',
       progress: 0,
-      hash: '',
       parameters: {
         sref: parameters.sref,
         ar: parameters.ar,
         s: parameters.s
       },
-      createdAt: new Date(),
-      isSaved: false,
-      modifiedImages: []
-    }
+      createdAt: new Date().toISOString(),
+      saved: false,
+      modifiedImages: []  // Initialize as empty array
+    };
 
-    setJobs(prev => [newJob, ...prev])
-    setPrompt('')
+    setJobs(prev => [newJob, ...prev]);
+    setInput('');
 
     try {
-      console.log('Making API call to generate image...')
-      const response = await midjourneyApi.imagine({ prompt: fullPrompt })
-      console.log('API response:', response)
+      console.log('Making API call to generate image...');
+      const response = await midjourneyApi.imagine({ prompt: fullPrompt });
+      console.log('API response:', response);
 
       if (response.hash) {
         setJobs(prev => prev.map(job =>
           job.id === jobId
             ? { ...job, hash: response.hash, status: 'generating' }
             : job
-        ))
+        ));
 
         const checkStatus = async () => {
-          await handleStatusCheck(response.hash, jobId)
-        }
-        statusPollingIntervals.current[jobId] = setInterval(checkStatus, 5000)
-        checkStatus()
+          await handleStatusCheck(jobId, response.hash);
+        };
+        checkStatus();
       }
     } catch (error) {
-      console.error('Error generating image:', error)
+      console.error('Error generating image:', error);
       setJobs(prev => prev.map(job =>
         job.id === jobId
           ? { ...job, status: 'error', error: 'Failed to generate image' }
           : job
-      ))
+      ));
       toast({
         title: 'Error',
         description: 'Failed to generate image. Please try again.',
         variant: 'destructive',
-      })
-    }
-  }
-
-  const handleSaveJob = async (jobId: string) => {
-    try {
-      const job = jobs.find(j => j.id === jobId);
-      if (!job) return;
-
-      if (job.isSaved) {
-        // Unsave the job
-        await savedJobsApi.deleteSavedJob(job.savedJobId!);
-        setJobs(prev => prev.map(j =>
-          j.id === jobId
-            ? { ...j, isSaved: false, savedJobId: undefined }
-            : j
-        ));
-        toast({
-          title: 'Job unsaved',
-          description: 'The job has been removed from your saved jobs.',
-        });
-      } else {
-        // Save the job
-        const savedJob = await savedJobsApi.saveJob({
-          original_job_id: job.id,
-          prompt: job.prompt,
-          parameters: job.parameters || {},
-          image_url: job.imageUrl!,
-          modified_images: job.modifiedImages?.map(img => ({
-            type: img.type,
-            url: img.url
-          })) || [],
-          created_at: job.createdAt
-        });
-        setJobs(prev => prev.map(j =>
-          j.id === jobId
-            ? { ...j, isSaved: true, savedJobId: savedJob.id }
-            : j
-        ));
-        toast({
-          title: 'Job saved',
-          description: 'The job has been saved to your collection.',
-        });
-      }
-    } catch (error) {
-      console.error('Error saving/unsaving job:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to save/unsave the job. Please try again.',
-        variant: 'destructive',
       });
     }
-  }
+  };
 
-  const handleUpscale = async (jobId: string, index: number) => {
+  const handleUpscale = async (jobId: string, choice: number) => {
     try {
-      const job = jobs.find(j => j.id === jobId)
-      if (!job?.hash) return
+      const job = jobs.find(j => j.id === jobId);
+      if (!job?.hash) {
+        toast({
+          title: "Error",
+          description: "Cannot upscale: job not found or missing hash",
+          variant: "destructive",
+        });
+        return;
+      }
 
+      // Clear any existing interval for this upscale job
+      const upscaleJobId = `${jobId}-upscale-${choice}`;
+      if (statusPollingIntervals.current[upscaleJobId]) {
+        clearInterval(statusPollingIntervals.current[upscaleJobId]);
+        delete statusPollingIntervals.current[upscaleJobId];
+      }
+
+      // Update job status to upscaling
+      setJobs(prev =>
+        prev.map(j =>
+          j.id === jobId
+            ? {
+                ...j,
+                status: 'upscaling',
+                progress: 0,
+                modifiedImages: (j.modifiedImages || []).filter(img => img.jobId !== upscaleJobId)
+              }
+            : j
+        )
+      );
+
+      // Make upscale request
       const response = await midjourneyApi.upscale({
         hash: job.hash,
-        choice: index
-      })
+        choice
+      });
 
-      // Start tracking the upscale job
-      const upscaleJobId = `${jobId}-upscale-${index}`
-      setJobs(prev => prev.map(j => {
-        if (j.id !== jobId) return j
-        return {
-          ...j,
-          modifiedImages: [
-            ...(j.modifiedImages || []),
-            { type: 'upscale', url: '', jobId: upscaleJobId }
-          ]
-        }
-      }))
-
-      // Poll for upscale status
+      // Start polling for status
       const checkStatus = async () => {
-        const status = await midjourneyApi.getStatus(response.hash)
-        if (status.status === 'done' && status.result?.url) {
-          setJobs(prev => prev.map(j => {
-            if (j.id !== jobId) return j
-            return {
-              ...j,
-              modifiedImages: j.modifiedImages?.map(img =>
-                img.jobId === upscaleJobId
-                  ? { ...img, url: status.result!.url }
-                  : img
-              )
-            }
-          }))
-          if (statusPollingIntervals.current[upscaleJobId]) {
-            clearInterval(statusPollingIntervals.current[upscaleJobId])
-            delete statusPollingIntervals.current[upscaleJobId]
+        try {
+          const status = await midjourneyApi.getStatus(response.hash);
+
+          setJobs(prev =>
+            prev.map(j =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    status: status.status === 'done' ? 'done' : 'upscaling',
+                    progress: status.progress || 0,
+                    modifiedImages: [
+                      ...(j.modifiedImages || []).filter(img => img.jobId !== upscaleJobId),
+                      ...(status.status === 'done' && status.result?.url
+                        ? [{ type: 'upscale' as const, url: status.result.url, jobId: upscaleJobId }]
+                        : [])
+                    ]
+                  }
+                : j
+            )
+          );
+
+          if (status.status === 'done') {
+            clearInterval(statusPollingIntervals.current[upscaleJobId]);
+            delete statusPollingIntervals.current[upscaleJobId];
+          } else if (status.status === 'error') {
+            clearInterval(statusPollingIntervals.current[upscaleJobId]);
+            delete statusPollingIntervals.current[upscaleJobId];
+            throw new Error(status.status_reason || 'Unknown error occurred during upscaling');
           }
+        } catch (error: any) {
+          console.error('Error checking upscale status:', error);
+          clearInterval(statusPollingIntervals.current[upscaleJobId]);
+          delete statusPollingIntervals.current[upscaleJobId];
+          toast({
+            title: "Error",
+            description: "Failed to check upscale status: " + (error.message || 'Unknown error'),
+            variant: "destructive",
+          });
         }
-      }
-      checkStatus()
-      statusPollingIntervals.current[upscaleJobId] = setInterval(checkStatus, 5000)
-    } catch (error) {
-      console.error('Error upscaling image:', error)
+      };
+
+      // Initial check and set up interval
+      await checkStatus();
+      statusPollingIntervals.current[upscaleJobId] = setInterval(checkStatus, 5000);
+    } catch (error: any) {
+      console.error('Error upscaling image:', error);
       toast({
-        title: 'Error upscaling image',
-        description: 'Failed to upscale the image',
-        variant: 'destructive',
-      })
+        title: "Error",
+        description: "Failed to upscale image: " + (error.message || 'Unknown error'),
+        variant: "destructive",
+      });
     }
-  }
+  };
 
   const handleVariation = async (jobId: string, index: number) => {
     try {
@@ -431,169 +465,242 @@ function App() {
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleGenerate()
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleGenerate();
     }
-  }
+  };
 
   return (
     <div className="container mx-auto py-8">
       <h1 className="text-3xl font-bold mb-8">Midjourney Image Generator</h1>
 
       <div className="space-y-4">
-        <div>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Input
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Enter your prompt..."
-                className="pr-32"
-              />
-              <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1 items-center">
-                {Object.entries(parameters).map(([key, value]) => (
-                  <Badge
-                    key={key}
-                    variant="secondary"
-                    className={`cursor-pointer flex items-center gap-1 text-xs ${
-                      key === 'sref' ? 'bg-blue-100 text-blue-800 hover:bg-blue-200' :
-                      key === 'ar' ? 'bg-green-100 text-green-800 hover:bg-green-200' :
-                      'bg-purple-100 text-purple-800 hover:bg-purple-200'
-                    }`}
-                  >
-                    --{key} {String(value)}
-                    <X
-                      className="h-2 w-2 hover:text-red-500 transition-colors"
-                      onClick={() => handleRemoveParameter(key as keyof PromptParameters)}
-                    />
-                  </Badge>
-                ))}
-              </div>
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <Input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyPress={handleKeyPress}
+              placeholder="Enter your prompt..."
+              className="pr-32"
+            />
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+              {Object.entries(parameters).map(([key, value]) => value && (
+                <Badge
+                  key={key}
+                  className={`cursor-pointer flex items-center gap-1 text-xs ${
+                    key === 'sref' ? 'bg-blue-100 text-blue-800 hover:bg-blue-200' :
+                    key === 'ar' ? 'bg-green-100 text-green-800 hover:bg-green-200' :
+                    'bg-gray-100 text-gray-800 hover:bg-gray-200'
+                  }`}
+                >
+                  --{key} {String(value)}
+                  <X
+                    className="h-3 w-3 ml-1 cursor-pointer"
+                    onClick={() => handleRemoveParameter(key as keyof PromptParameters)}
+                  />
+                </Badge>
+              ))}
             </div>
-            <Button onClick={handleGenerate}>Generate</Button>
           </div>
-          <ParameterControls
-            parameters={parameters}
-            onParametersChange={setParameters}
-          />
+          <div className="flex gap-2">
+            <Button onClick={handleGenerate}>Generate</Button>
+            <ParameterControls
+              parameters={parameters}
+              onParametersChange={setParameters}
+            />
+          </div>
         </div>
 
-        <div className="mt-8">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Prompt</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Progress</TableHead>
-                <TableHead>Preview</TableHead>
-                <TableHead>Modified Images</TableHead>
-                <TableHead>Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {jobs.map(job => (
-                <TableRow key={job.id}>
-                  <TableCell className="font-medium">{job.prompt}</TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      {job.status === 'generating' && (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      )}
-                      <span className="capitalize">{job.status}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      <div className="w-[200px] flex items-center gap-2">
-                        <Progress value={job.progress} className="h-2" />
-                        {job.status === 'generating' ? (
-                          <span className="text-sm text-gray-600 min-w-[3rem]">{job.progress}%</span>
-                        ) : job.status === 'done' ? (
-                          <CheckCircle2 className="h-4 w-4 text-green-500" />
-                        ) : null}
-                      </div>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {job.imageUrl && (
-                      <img
-                        src={job.imageUrl}
-                        alt={job.prompt}
-                        className="w-48 h-48 object-cover rounded cursor-pointer hover:opacity-80 transition-opacity"
-                        onClick={() => window.open(job.imageUrl, '_blank')}
-                      />
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex gap-2">
-                      {job.modifiedImages?.map((img, i) => (
-                        <img
-                          key={i}
-                          src={img.url}
-                          alt={`${job.prompt} - ${img.type}`}
-                          className="w-48 h-48 object-cover rounded cursor-pointer hover:opacity-80 transition-opacity"
-                          onClick={() => window.open(img.url, '_blank')}
-                        />
-                      ))}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {job.status === 'done' && (
-                      <div className="flex gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleSaveJob(job.id)}
-                        >
-                          {job.isSaved ? (
+        <Tabs value={activeTab} onValueChange={setActiveTab as (value: string) => void} className="w-full">
+          <TabsList>
+            <TabsTrigger value="recent">Recent Jobs</TabsTrigger>
+            <TabsTrigger value="saved">Saved Jobs</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="recent">
+            <div className="mt-8">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Prompt</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Preview</TableHead>
+                    <TableHead>Modified Images</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {jobs.map(job => (
+                    <TableRow key={job.id}>
+                      <TableCell className="font-medium">{job.prompt}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          {job.status === 'generating' ? (
                             <>
-                              <BookmarkCheck className="h-4 w-4 mr-1" />
-                              Saved
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <span className="text-sm text-gray-600 min-w-[3rem]">{job.progress}%</span>
                             </>
+                          ) : job.status === 'done' ? (
+                            <CheckCircle2 className="h-4 w-4 text-green-500" />
                           ) : (
-                            <>
-                              <BookmarkPlus className="h-4 w-4 mr-1" />
-                              Save
-                            </>
+                            <X className="h-4 w-4 text-red-500" />
                           )}
-                        </Button>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {job.imageUrl && (
+                          <img
+                            src={job.imageUrl}
+                            alt={job.prompt}
+                            className="w-48 h-48 object-cover rounded shadow-sm hover:opacity-90 transition-opacity cursor-pointer"
+                            onClick={() => window.open(job.imageUrl, '_blank')}
+                          />
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex gap-2">
+                          {job.modifiedImages?.map((img, i) => (
+                            <img
+                              key={i}
+                              src={img.url}
+                              alt={`${job.prompt} - ${img.type}`}
+                              className="w-48 h-48 object-cover rounded shadow-sm hover:opacity-90 transition-opacity cursor-pointer"
+                              onClick={() => window.open(img.url, '_blank')}
+                            />
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {job.status === 'done' && (
+                          <div className="flex gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleSaveJob(job.id)}
+                            >
+                              {job.saved ? (
+                                <>
+                                  <BookmarkCheck className="h-4 w-4 mr-1" />
+                                  Saved
+                                </>
+                              ) : (
+                                <>
+                                  <BookmarkPlus className="h-4 w-4 mr-1" />
+                                  Save
+                                </>
+                              )}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleUpscale(job.id, 1)}
+                            >
+                              U1
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleUpscale(job.id, 2)}
+                            >
+                              U2
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleUpscale(job.id, 3)}
+                            >
+                              U3
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleVariation(job.id, 1)}
+                            >
+                              V1
+                            </Button>
+                          </div>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="saved">
+            <div className="mt-8">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Prompt</TableHead>
+                    <TableHead>Preview</TableHead>
+                    <TableHead>Modified Images</TableHead>
+                    <TableHead>Parameters</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {savedJobs.map(job => (
+                    <TableRow key={job.id}>
+                      <TableCell className="font-medium">{job.prompt}</TableCell>
+                      <TableCell>
+                        <img
+                          src={job.image_url}
+                          alt={job.prompt}
+                          className="w-48 h-48 object-cover rounded cursor-pointer hover:opacity-80 transition-opacity"
+                          onClick={() => window.open(job.image_url, '_blank')}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex gap-2">
+                          {job.modified_images?.map((img, i) => (
+                            <img
+                              key={i}
+                              src={img.url}
+                              alt={`${job.prompt} - ${img.type}`}
+                              className="w-48 h-48 object-cover rounded cursor-pointer hover:opacity-80 transition-opacity"
+                              onClick={() => window.open(img.url, '_blank')}
+                            />
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          {Object.entries(job.parameters).map(([key, value]) => value && (
+                            <Badge
+                              key={key}
+                              variant="secondary"
+                              className={
+                                key === 'sref' ? 'bg-blue-100 text-blue-800' :
+                                key === 'ar' ? 'bg-green-100 text-green-800' :
+                                'bg-purple-100 text-purple-800'
+                              }
+                            >
+                              --{key} {String(value)}
+                            </Badge>
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell>
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => handleUpscale(job.id, 1)}
+                          onClick={() => handleSaveJob(job.original_job_id)}
                         >
-                          U1
+                          <BookmarkCheck className="h-4 w-4 mr-1" />
+                          Remove
                         </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleUpscale(job.id, 2)}
-                        >
-                          U2
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleUpscale(job.id, 3)}
-                        >
-                          U3
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleVariation(job.id, 1)}
-                        >
-                          V1
-                        </Button>
-                      </div>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   )

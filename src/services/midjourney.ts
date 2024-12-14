@@ -1,35 +1,6 @@
-import axios, { AxiosResponse } from 'axios';
+import { proxyApi } from './proxy';
 
-const api = axios.create({
-  baseURL: 'https://app-maupcgux.fly.dev',
-  headers: {
-    'Content-Type': 'application/json'
-  },
-  timeout: 30000, // 30 second timeout
-});
-
-async function withRetry<T>(
-  apiCall: () => Promise<AxiosResponse<T>>,
-  retries = 3
-): Promise<T> {
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      const response = await apiCall();
-      return response.data;
-    } catch (error: any) {
-      lastError = error;
-      if (error.code !== 'ERR_NETWORK' || attempt === retries - 1) {
-        throw error;
-      }
-      // Exponential backoff
-      const backoff = Math.min(1000 * (attempt + 1), 3000);
-      await new Promise(resolve => setTimeout(resolve, backoff));
-    }
-  }
-  throw lastError;
-}
-
+// Type definitions
 export interface ImagineRequest {
   prompt: string;
   webhook_url?: string;
@@ -76,64 +47,76 @@ export interface StatusResponse {
   prompt?: string;
   type?: string;
   prefilter_result?: any[];
+  sref_random_key?: string;  // Added field for random sref value
 }
 
 export const midjourneyApi = {
-  imagine: async (request: ImagineRequest) => {
+  imagine: async (request: ImagineRequest): Promise<TaskResponse> => {
     try {
       console.log('Sending imagine request:', request);
-      const data = await withRetry(() => api.post<TaskResponse>('/midjourney/v2/imagine', request));
-      console.log('Imagine response:', data);
-      return data;
+      const response = await proxyApi.post<TaskResponse>('/midjourney/v2/imagine', request);
+      console.log('Imagine response:', response);
+      return response;
     } catch (error: any) {
       console.error('Error in imagine request:', error);
       console.error('Error details:', {
         message: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
+        response: error.response,
+        status: error.status,
       });
-      if (error.code === 'ERR_NETWORK') {
-        throw new Error('Network error occurred. Please check your connection and try again.');
-      }
       throw error;
     }
   },
 
-  getStatus: async (hash: string) => {
+  getStatus: async (hash: string): Promise<StatusResponse> => {
     try {
       console.log('Checking status for hash:', hash);
-      const response = await api.get<StatusResponse>('/midjourney/v2/status', {
+      const response = await proxyApi.get<StatusResponse>('/midjourney/v2/status', {
         params: { hash }
       });
-      console.log('Status response:', response.data);
-      return response.data;
+      console.log('Status response:', response);
+      return response;
     } catch (error: any) {
       console.error('Error checking status:', error);
       console.error('Error details:', {
         message: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
+        response: error.response,
+        status: error.status,
       });
       throw error;
     }
   },
 
-  upscale: async (request: UpscaleRequest) => {
+  upscale: async (request: UpscaleRequest): Promise<TaskResponse> => {
     try {
-      const response = await api.post<TaskResponse>('/midjourney/v2/upscale', request);
-      return response.data;
+      console.log('Sending upscale request:', request);
+      const response = await proxyApi.post<TaskResponse>('/midjourney/v2/upscale', request);
+      console.log('Upscale response:', response);
+      return response;
     } catch (error: any) {
       console.error('Error in upscale request:', error);
+      console.error('Error details:', {
+        message: error.message,
+        response: error.response,
+        status: error.status,
+      });
       throw error;
     }
   },
 
-  variation: async (request: VariationRequest) => {
+  variation: async (request: VariationRequest): Promise<TaskResponse> => {
     try {
-      const response = await api.post<TaskResponse>('/midjourney/v2/variation', request);
-      return response.data;
+      console.log('Sending variation request:', request);
+      const response = await proxyApi.post<TaskResponse>('/midjourney/v2/variation', request);
+      console.log('Variation response:', response);
+      return response;
     } catch (error: any) {
       console.error('Error in variation request:', error);
+      console.error('Error details:', {
+        message: error.message,
+        response: error.response,
+        status: error.status,
+      });
       throw error;
     }
   },
