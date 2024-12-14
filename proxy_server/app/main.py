@@ -37,9 +37,24 @@ async def forward_request(path: str, method: str, data: Optional[Dict[str, Any]]
             else:
                 response = await client.get(url, headers=headers, params=data)
 
-            response.raise_for_status()
+            # Log the response for debugging
+            print(f"API Response ({method} {path}):", response.status_code)
+            print("Response content:", response.text)
+
+            # If the response is not successful, raise the actual error from the API
+            if response.status_code >= 400:
+                error_data = response.json()
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_data.get('detail', str(error_data))
+                )
+
             return response.json()
         except httpx.HTTPError as e:
+            print(f"HTTP Error in forward_request: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            print(f"Unexpected error in forward_request: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/midjourney/v2/imagine")
@@ -91,4 +106,8 @@ async def update_job_notes(job_id: UUID, job_update: schemas.SavedJobUpdate, db:
 
 @app.get("/healthz")
 async def healthz():
+    return {"status": "ok"}
+
+@app.get("/health")
+async def health_check():
     return {"status": "ok"}

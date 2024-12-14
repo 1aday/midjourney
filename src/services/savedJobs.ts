@@ -1,14 +1,6 @@
-import axios from 'axios';
-
-const api = axios.create({
-  baseURL: 'https://app-maupcgux.fly.dev',
-  headers: {
-    'Content-Type': 'application/json'
-  }
-});
+import { proxyApi } from './proxy';
 
 export interface SavedJobRequest {
-  original_job_id: string;
   prompt: string;
   parameters: Record<string, any>;
   image_url: string;
@@ -16,7 +8,6 @@ export interface SavedJobRequest {
     type: 'upscale' | 'variation';
     url: string;
   }[];
-  created_at: Date;
   notes?: string;
 }
 
@@ -36,22 +27,42 @@ export interface SavedJob {
 }
 
 export const savedJobsApi = {
-  saveJob: async (job: SavedJobRequest): Promise<SavedJob> => {
-    const response = await api.post<SavedJob>('/api/saved-jobs', job);
-    return response.data;
+  saveJob: async (job: Omit<SavedJobRequest, 'original_job_id' | 'created_at'>): Promise<SavedJob> => {
+    try {
+      const response = await proxyApi.post<SavedJob>('/api/saved-jobs', job);
+      return response;
+    } catch (error) {
+      console.error('Error saving job:', error);
+      throw error;
+    }
   },
 
   listSavedJobs: async (): Promise<SavedJob[]> => {
-    const response = await api.get<SavedJob[]>('/api/saved-jobs');
-    return response.data;
+    try {
+      const response = await proxyApi.get<SavedJob[]>('/api/saved-jobs');
+      return response;
+    } catch (error) {
+      console.error('Error getting saved jobs:', error);
+      throw error;
+    }
   },
 
   deleteSavedJob: async (jobId: string): Promise<void> => {
-    await api.delete(`/api/saved-jobs/${jobId}`);
+    try {
+      await proxyApi.delete<void>(`/api/saved-jobs/${jobId}`);
+    } catch (error) {
+      console.error('Error deleting saved job:', error);
+      throw error;
+    }
   },
 
   updateJobNotes: async (jobId: string, notes: string): Promise<SavedJob> => {
-    const response = await api.patch<SavedJob>(`/api/saved-jobs/${jobId}`, { notes });
-    return response.data;
+    try {
+      const response = await proxyApi.patch<SavedJob>(`/api/saved-jobs/${jobId}`, { notes });
+      return response;
+    } catch (error) {
+      console.error('Error updating job notes:', error);
+      throw error;
+    }
   }
 };

@@ -8,13 +8,21 @@ class ModifiedImage(BaseModel):
     url: str
 
 class SavedJobCreate(BaseModel):
-    original_job_id: str
     prompt: str
     parameters: Dict
     image_url: str
     modified_images: List[ModifiedImage] = []
-    created_at: datetime
+    original_job_id: Optional[str] = None
+    created_at: Optional[datetime] = None
     notes: Optional[str] = None
+
+    def model_dump(self):
+        data = super().model_dump()
+        if not data.get('created_at'):
+            data['created_at'] = datetime.utcnow()
+        if not data.get('original_job_id'):
+            data['original_job_id'] = 'manual'
+        return data
 
 class SavedJobUpdate(BaseModel):
     notes: str
